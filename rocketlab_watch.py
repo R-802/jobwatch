@@ -7,7 +7,10 @@ about, and emails you any that it hasn't seen before.
 
 Standard library only - no pip installs needed.
 
-Config comes from environment variables:
+Alerts: if SMTP_USER + SMTP_PASS are set it emails you; otherwise (in GitHub
+Actions) it opens a GitHub issue, which GitHub emails you about.
+
+Email config (optional) comes from environment variables:
   SMTP_HOST   (default smtp.gmail.com)
   SMTP_PORT   (default 465)
   SMTP_USER   your email login, e.g. you@gmail.com
@@ -31,6 +34,7 @@ import time
 import urllib.request
 from datetime import datetime, timezone
 from email.message import EmailMessage
+from email.utils import formataddr
 from pathlib import Path
 
 # --------------------------------------------------------------------------
@@ -71,6 +75,10 @@ EXCLUDE_KEYWORDS = [
     # r"\bintern\b",
     # r"\bprincipal\b",
 ]
+
+# How alerts look in your inbox.
+SUBJECT_PREFIX = "🚀 ROCKET LAB JOB ALERT:"
+SENDER_NAME = "Rocket Lab Job Alert"
 
 STATE_FILE = Path(__file__).with_name("seen_jobs.json")
 
@@ -138,11 +146,11 @@ def nice_date(iso):
 def build_email(jobs, first_run):
     n = len(jobs)
     if first_run:
-        subject = f"Rocket Lab watcher is running - {n} matching role{'s' if n != 1 else ''} open now"
+        subject = f"{SUBJECT_PREFIX} watcher running - {n} matching role{'s' if n != 1 else ''} open now"
         intro = ("Your Rocket Lab job watcher is set up. These matching roles are open right now. "
                  "From here on you'll only get an email when a new one appears.")
     else:
-        subject = f"New Rocket Lab role{'s' if n != 1 else ''}: " + "; ".join(j["title"] for j in jobs[:3])
+        subject = f"{SUBJECT_PREFIX} " + "; ".join(j["title"] for j in jobs[:3])
         if n > 3:
             subject += f" (+{n - 3} more)"
         intro = f"{n} new matching role{'s' if n != 1 else ''} just appeared. Apply early!"
@@ -180,7 +188,7 @@ def send_email(subject, text, body_html):
 
     msg = EmailMessage()
     msg["Subject"] = subject
-    msg["From"] = user
+    msg["From"] = formataddr((SENDER_NAME, user))
     msg["To"] = to
     msg.set_content(text)
     msg.add_alternative(body_html, subtype="html")
@@ -194,6 +202,34 @@ def send_email(subject, text, body_html):
             s.starttls()
             s.login(user, password)
             s.send_message(msg)
+
+
+def open_github_issue(subject, text):
+    """Alert via a GitHub issue - GitHub emails the repo owner about it. No passwords needed."""
+    token = os.environ.get("GITHUB_TOKEN")
+    repo = os.environ.get("GITHUB_REPOSITORY")
+    if not token or not repo:
+        raise RuntimeError("No email settings and not running in GitHub Actions - nowhere to send the alert")
+    req = urllib.request.Request(
+        f"https://api.github.com/repos/{repo}/issues",
+        data=json.dumps({"title": subject, "body": text}).encode(),
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "rocketlab-job-watch/1.0",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=30) as r:
+        print("Opened issue:", json.load(r).get("html_url"))
+
+
+def notify(subject, text, body_html):
+    if os.environ.get("SMTP_USER") and os.environ.get("SMTP_PASS"):
+        send_email(subject, text, body_html)
+        print("Email sent.")
+    else:
+        open_github_issue(subject, text)
 
 
 def main():
@@ -224,8 +260,7 @@ def main():
             print("\n--- EMAIL (dry run) ---\nSubject:", subject, "\n")
             print(text)
             return
-        send_email(subject, text, body_html)
-        print("Email sent.")
+        notify(subject, text, body_html)
 
     if args.dry_run:
         return
